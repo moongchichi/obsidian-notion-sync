@@ -1,0 +1,11 @@
+[project]
+name = "project1"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.13"
+dependencies = [
+    "notion-client>=3.0.0",
+    "python-dotenv>=1.2.2",
+    "python-frontmatter>=1.1.0",
+    "watchdog>=6.0.0",
+]
