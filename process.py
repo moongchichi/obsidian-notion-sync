@@ -18,6 +18,7 @@ OUTPUT_DIR = Path("output")
 
 notion = Client(auth=os.environ["NOTION_TOKEN"])
 DATABASE_ID = os.environ["NOTION_DATABASE_ID"]
+INBOX_ID = os.environ["NOTION_INBOX_ID"]
 
 
 def markdown_to_notion_blocks(content: str) -> list:
@@ -64,7 +65,7 @@ def markdown_to_notion_blocks(content: str) -> list:
     return blocks
 
 
-def find_page_by_title(title: str) -> str | None:
+def find_page_in_db(title: str) -> str | None:
     results = notion.databases.query(
         database_id=DATABASE_ID,
         filter={"property": "title", "title": {"equals": title}},
@@ -74,32 +75,59 @@ def find_page_by_title(title: str) -> str | None:
     return None
 
 
+def find_page_in_inbox(title: str) -> str | None:
+    children = notion.blocks.children.list(block_id=INBOX_ID)
+    for block in children["results"]:
+        if block["type"] == "child_page" and block["child_page"]["title"] == title:
+            return block["id"]
+    return None
+
+
 def clear_page_blocks(page_id: str):
     response = notion.blocks.children.list(block_id=page_id)
     for block in response["results"]:
         notion.blocks.delete(block_id=block["id"])
 
 
-def upsert_to_notion(title: str, content: str):
-    blocks = markdown_to_notion_blocks(content)
+def append_blocks(page_id: str, blocks: list):
     chunk_size = 100
-    page_id = find_page_by_title(title)
-
-    if page_id:
-        print(f"  Updating existing page: {title}")
-        clear_page_blocks(page_id)
-    else:
-        print(f"  Creating new page: {title}")
-        page = notion.pages.create(
-            parent={"database_id": DATABASE_ID},
-            properties={"title": {"title": [{"type": "text", "text": {"content": title}}]}},
-            children=blocks[:chunk_size],
-        )
-        page_id = page["id"]
-        blocks = blocks[chunk_size:]
-
     for i in range(0, len(blocks), chunk_size):
         notion.blocks.children.append(block_id=page_id, children=blocks[i : i + chunk_size])
+
+
+def upsert_to_notion(title: str, content: str, project: str | None):
+    blocks = markdown_to_notion_blocks(content)
+
+    if project:
+        page_id = find_page_in_db(title)
+        if page_id:
+            print(f"  Updating Projects page: {title}")
+            clear_page_blocks(page_id)
+            append_blocks(page_id, blocks)
+        else:
+            print(f"  Creating Projects page: {title}")
+            page = notion.pages.create(
+                parent={"database_id": DATABASE_ID},
+                properties={"title": {"title": [{"type": "text", "text": {"content": title}}]}},
+                children=blocks[:100],
+            )
+            append_blocks(page["id"], blocks[100:])
+            page_id = page["id"]
+    else:
+        page_id = find_page_in_inbox(title)
+        if page_id:
+            print(f"  Updating Inbox page: {title}")
+            clear_page_blocks(page_id)
+            append_blocks(page_id, blocks)
+        else:
+            print(f"  Creating Inbox page: {title}")
+            page = notion.pages.create(
+                parent={"page_id": INBOX_ID},
+                properties={"title": {"title": [{"type": "text", "text": {"content": title}}]}},
+                children=blocks[:100],
+            )
+            append_blocks(page["id"], blocks[100:])
+            page_id = page["id"]
 
     print(f"  Done → https://notion.so/{page_id.replace('-', '')}")
 
@@ -115,13 +143,14 @@ def process_file(filepath: Path):
         return
 
     title = post.metadata.get("title") or filepath.stem
-    print(f"Processing: {filepath.name}")
+    project = post.metadata.get("project")
+    print(f"Processing: {filepath.name} {'→ Projects' if project else '→ Inbox'}")
 
     OUTPUT_DIR.mkdir(exist_ok=True)
     shutil.copy2(filepath, OUTPUT_DIR / filepath.name)
     print(f"  Saved to output/{filepath.name}")
 
-    upsert_to_notion(title, post.content)
+    upsert_to_notion(title, post.content, project)
 
 
 class InputWatcher(FileSystemEventHandler):
