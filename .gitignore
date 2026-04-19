@@ -2,3 +2,4 @@
 __pycache__/
 *.pyc
 config_local.py
+.claude/settings.local.json
