@@ -110,7 +110,7 @@ def upsert_page(title: str, content: str, project: str | None, mapping: dict | N
 
 # ── Title pull ─────────────────────────────────────────────────────────────────
 
-def pull_titles(input_dir: Path, mappings_dir: Path):
+def pull_titles(mappings_dir: Path):
     if not mappings_dir.exists():
         print("No mappings found.")
         return
@@ -118,17 +118,10 @@ def pull_titles(input_dir: Path, mappings_dir: Path):
     for mapping_path in sorted(mappings_dir.glob("*.json")):
         with open(mapping_path, encoding="utf-8") as f:
             mapping = json.load(f)
-        local_file = input_dir / mapping["source"]
-        if not local_file.exists():
-            continue
         notion_title = get_notion_title(mapping["notion_id"])
         if not notion_title or notion_title == mapping["title"]:
             continue
         print(f"  '{mapping['title']}' → '{notion_title}' ({mapping['source']})")
-        post = frontmatter.load(local_file)
-        post.metadata["title"] = notion_title
-        with open(local_file, "w", encoding="utf-8") as f:
-            f.write(frontmatter.dumps(post))
         mapping["title"] = notion_title
         with open(mapping_path, "w", encoding="utf-8") as f:
             json.dump(mapping, f, ensure_ascii=False, indent=2)

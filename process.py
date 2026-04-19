@@ -50,7 +50,8 @@ def process_file(filepath: Path):
     if post.metadata.get("status") != "done":
         return
 
-    title = post.metadata.get("title") or filepath.stem
+    mapping = load_mapping(filepath.stem)
+    title = (mapping and mapping.get("title")) or post.metadata.get("title") or filepath.stem
     project = post.metadata.get("project")
     print(f"Processing: {filepath.name} [{title}] {'→ Projects' if project else '→ Inbox'}")
 
@@ -58,7 +59,6 @@ def process_file(filepath: Path):
     shutil.copy2(filepath, OUTPUT_DIR / filepath.name)
     print(f"  Saved: output/{filepath.name}")
 
-    mapping = load_mapping(filepath.stem)
     page_id = upsert_page(title, post.content, project, mapping)
     save_mapping(filepath.stem, filepath.name, title, page_id)
     print(f"  Mapping saved.")
@@ -79,7 +79,7 @@ class InputWatcher(FileSystemEventHandler):
 def _pull_loop(stop_event: threading.Event):
     while not stop_event.wait(PULL_INTERVAL):
         print("\n[Auto-pull] Checking Notion title changes...")
-        pull_titles(INPUT_DIR, MAPPINGS_DIR)
+        pull_titles(MAPPINGS_DIR)
 
 
 def watch():
@@ -111,7 +111,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.pull:
-        pull_titles(INPUT_DIR, MAPPINGS_DIR)
+        pull_titles(MAPPINGS_DIR)
     elif args.watch:
         watch()
     elif args.file:
