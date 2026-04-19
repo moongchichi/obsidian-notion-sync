@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 import argparse
+import json
 import os
 import shutil
 import time
 from pathlib import Path
 
+import anthropic
 import frontmatter
 from dotenv import load_dotenv
 from notion_client import Client
@@ -15,11 +17,40 @@ load_dotenv()
 
 INPUT_DIR = Path("input")
 OUTPUT_DIR = Path("output")
+MAPPINGS_DIR = OUTPUT_DIR / ".mappings"
 
 notion = Client(auth=os.environ["NOTION_TOKEN"])
+claude = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 DATABASE_ID = os.environ["NOTION_DATABASE_ID"]
 INBOX_ID = os.environ["NOTION_INBOX_ID"]
 
+
+# ── Claude: raw content → split sections ──────────────────────────────────────
+
+def split_content(raw: str) -> list[dict]:
+    """Ask Claude to split raw notes into logically separate sections."""
+    with claude.messages.stream(
+        model="claude-haiku-4-5",
+        max_tokens=8000,
+        system=(
+            "당신은 노트 정리 전문가입니다. "
+            "사용자가 막 적어둔 원본 노트를 받아서 주제별로 분리해 정리해주세요. "
+            "반드시 아래 JSON 배열 형식으로만 답하세요 (다른 설명 없이):\n"
+            '[{"title": "제목", "content": "정리된 내용"}, ...]'
+        ),
+        messages=[{"role": "user", "content": raw}],
+    ) as stream:
+        result = stream.get_final_message()
+
+    text = next(b.text for b in result.content if b.type == "text")
+    # Strip markdown code fences if present
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+    return json.loads(text)
+
+
+# ── Notion helpers ─────────────────────────────────────────────────────────────
 
 def markdown_to_notion_blocks(content: str) -> list:
     blocks = []
@@ -90,22 +121,21 @@ def clear_page_blocks(page_id: str):
 
 
 def append_blocks(page_id: str, blocks: list):
-    chunk_size = 100
-    for i in range(0, len(blocks), chunk_size):
-        notion.blocks.children.append(block_id=page_id, children=blocks[i : i + chunk_size])
+    for i in range(0, len(blocks), 100):
+        notion.blocks.children.append(block_id=page_id, children=blocks[i : i + 100])
 
 
-def upsert_to_notion(title: str, content: str, project: str | None):
+def upsert_to_notion(title: str, content: str, project: str | None) -> str:
     blocks = markdown_to_notion_blocks(content)
 
     if project:
         page_id = find_page_in_db(title)
         if page_id:
-            print(f"  Updating Projects page: {title}")
+            print(f"    Updating Projects page: {title}")
             clear_page_blocks(page_id)
             append_blocks(page_id, blocks)
         else:
-            print(f"  Creating Projects page: {title}")
+            print(f"    Creating Projects page: {title}")
             page = notion.pages.create(
                 parent={"database_id": DATABASE_ID},
                 properties={"title": {"title": [{"type": "text", "text": {"content": title}}]}},
@@ -116,11 +146,11 @@ def upsert_to_notion(title: str, content: str, project: str | None):
     else:
         page_id = find_page_in_inbox(title)
         if page_id:
-            print(f"  Updating Inbox page: {title}")
+            print(f"    Updating Inbox page: {title}")
             clear_page_blocks(page_id)
             append_blocks(page_id, blocks)
         else:
-            print(f"  Creating Inbox page: {title}")
+            print(f"    Creating Inbox page: {title}")
             page = notion.pages.create(
                 parent={"page_id": INBOX_ID},
                 properties={"title": {"title": [{"type": "text", "text": {"content": title}}]}},
@@ -129,8 +159,12 @@ def upsert_to_notion(title: str, content: str, project: str | None):
             append_blocks(page["id"], blocks[100:])
             page_id = page["id"]
 
-    print(f"  Done → https://notion.so/{page_id.replace('-', '')}")
+    url = f"https://notion.so/{page_id.replace('-', '')}"
+    print(f"    Done → {url}")
+    return page_id
 
+
+# ── Core pipeline ──────────────────────────────────────────────────────────────
 
 def process_file(filepath: Path):
     try:
@@ -142,16 +176,48 @@ def process_file(filepath: Path):
     if post.metadata.get("status") != "done":
         return
 
-    title = post.metadata.get("title") or filepath.stem
     project = post.metadata.get("project")
     print(f"Processing: {filepath.name} {'→ Projects' if project else '→ Inbox'}")
 
+    # 1. Claude splits raw content into sections
+    print("  Splitting content with Claude...")
+    try:
+        sections = split_content(post.content)
+    except Exception as e:
+        print(f"  Split error: {e}")
+        return
+
+    print(f"  → {len(sections)} section(s) found")
+
+    # 2. Save each section to output/ and upload to Notion
     OUTPUT_DIR.mkdir(exist_ok=True)
-    shutil.copy2(filepath, OUTPUT_DIR / filepath.name)
-    print(f"  Saved to output/{filepath.name}")
+    MAPPINGS_DIR.mkdir(exist_ok=True)
 
-    upsert_to_notion(title, post.content, project)
+    mapping = {"source": filepath.name, "sections": []}
 
+    for section in sections:
+        title = section["title"]
+        content = section["content"]
+        safe_name = "".join(c if c.isalnum() or c in " -_" else "_" for c in title).strip()
+        out_path = OUTPUT_DIR / f"{safe_name}.md"
+
+        # Write output file with frontmatter
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(f"---\ntitle: {title}\nsource: {filepath.name}\n---\n\n{content}\n")
+        print(f"  Saved: output/{out_path.name}")
+
+        # Upload to Notion
+        page_id = upsert_to_notion(title, content, project)
+        mapping["sections"].append({"title": title, "file": out_path.name, "notion_id": page_id})
+
+    # 3. Save mapping record
+    mapping_path = MAPPINGS_DIR / f"{filepath.stem}.json"
+    with open(mapping_path, "w", encoding="utf-8") as f:
+        json.dump(mapping, f, ensure_ascii=False, indent=2)
+    print(f"  Mapping saved: {mapping_path}")
+
+
+# ── File watcher ───────────────────────────────────────────────────────────────
 
 class InputWatcher(FileSystemEventHandler):
     def on_modified(self, event):
@@ -176,6 +242,8 @@ def watch():
         observer.stop()
     observer.join()
 
+
+# ── Entrypoint ─────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Input → Output → Notion sync")
