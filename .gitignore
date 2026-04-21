@@ -4,3 +4,7 @@ __pycache__/
 config_local.py
 input/
 output/
+example_obsidian/*
+example_notion/*
+!example_obsidian/.gitkeep
+!example_notion/.gitkeep
